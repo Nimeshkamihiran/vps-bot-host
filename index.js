@@ -1,55 +1,156 @@
 const express = require('express');
-const bodyParser = require('body-parser');
-const simpleGit = require('simple-git');
-const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { exec } = require('child_process');
+const simpleGit = require('simple-git');
 
 const app = express();
 const PORT = 3000;
 const BASE_DIR = path.join(__dirname, 'repos');
+const REPO_NAME = 'neno-xmd-bot'; // fixed repo name
+const REPO_URL_BASE = 'https://github.com/'; // username will vary
 
-// Create repos folder if not exists
 if (!fs.existsSync(BASE_DIR)) fs.mkdirSync(BASE_DIR);
 
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true }));
 
-// Serve index.html from same folder
+// Serve HTML + CSS + JS
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+    <meta charset="UTF-8">
+    <title>Neno XMD Repo Host</title>
+    <style>
+    body {
+        background: #0d0d0d;
+        font-family: 'Arial', sans-serif;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        flex-direction: column;
+    }
+    .container { text-align: center; width: 80%; }
+    .neon-text {
+        font-size: 60px;
+        color: #00f0ff;
+        text-shadow: 0 0 5px #00f0ff, 0 0 10px #00f0ff, 0 0 20px #00f0ff, 0 0 40px #00f0ff;
+    }
+    button {
+        padding: 15px 30px;
+        border-radius: 8px;
+        border: none;
+        background: #00f0ff;
+        color: #0d0d0d;
+        font-weight: bold;
+        font-size: 16px;
+        cursor: pointer;
+        margin: 15px 0;
+    }
+    button:hover { background: #00c4d1; }
+    .console {
+        background: #1a1a1a;
+        color: #0ff;
+        padding: 15px;
+        border-radius: 8px;
+        width: 100%;
+        max-height: 300px;
+        overflow-y: auto;
+        font-family: monospace;
+        text-align: left;
+    }
+    input {
+        padding: 10px;
+        border-radius: 6px;
+        border: 2px solid #00f0ff;
+        margin-right: 10px;
+        background: #1a1a1a;
+        color: #fff;
+        outline: none;
+    }
+    input::placeholder { color: #aaa; }
+    </style>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const socket = io();
+        const consoleOutput = document.getElementById('consoleOutput');
+        const runForm = document.getElementById('runForm');
+
+        socket.on('log', data => {
+            const line = document.createElement('div');
+            line.textContent = data;
+            consoleOutput.appendChild(line);
+            consoleOutput.scrollTop = consoleOutput.scrollHeight;
+        });
+
+        runForm.addEventListener('submit', e => {
+            e.preventDefault();
+            const formData = new FormData(runForm);
+            fetch('/run', { method: 'POST', body: new URLSearchParams(formData) })
+                .then(res => res.text())
+                .then(msg => console.log(msg));
+        });
+    });
+    </script>
+    </head>
+    <body>
+    <div class="container">
+        <h1 class="neon-text">NENO XMD</h1>
+        <p>Repo: <strong>neno-xmd-bot</strong></p>
+        <form id="runForm">
+            <input type="text" name="username" placeholder="GitHub Username (default: Nimeshkamihiran)">
+            <button type="submit">Run Repo</button>
+        </form>
+        <div id="consoleOutput" class="console"></div>
+    </div>
+    </body>
+    </html>
+    `);
 });
 
-// Handle form submission
-app.post('/clone', async (req, res) => {
-    const userName = req.body.userName.trim();
-    const repoName = req.body.repoName.trim();
-
-    if (repoName !== 'neno-xmd-bot') {
-        return res.send("❌ Repo name must be 'neno-xmd-bot' to submit!");
-    }
-
-    const repoUrl = `https://github.com/${userName}/${repoName}.git`;
-    const folderName = "neno-xmd";
+// Run repo
+app.post('/run', async (req, res) => {
+    const username = req.body.username || 'Nimeshkamihiran';
+    const repoUrl = `${REPO_URL_BASE}${username}/${REPO_NAME}.git`;
+    const folderName = `${REPO_NAME}-${username}-${Date.now()}`;
     const repoPath = path.join(BASE_DIR, folderName);
-    const git = simpleGit();
+
+    const io = req.app.get('io');
+    function sendLog(msg) { io.emit('log', msg); }
 
     try {
+        sendLog(`Cloning ${repoUrl} into ${folderName} ...`);
+        const git = simpleGit();
         await git.clone(repoUrl, repoPath);
-        console.log(`Cloned ${repoUrl} to ${repoPath}`);
+        sendLog('✅ Repo cloned!');
 
         if (fs.existsSync(path.join(repoPath, 'package.json'))) {
-            exec(`cd ${repoPath} && npm install && npm start`, (err, stdout, stderr) => {
-                if (err) console.error(err);
-                console.log(stdout);
-                console.error(stderr);
+            sendLog('Installing dependencies...');
+            const install = exec(`cd ${repoPath} && npm install`);
+            install.stdout.on('data', data => sendLog(data));
+            install.stderr.on('data', data => sendLog(data));
+
+            install.on('close', () => {
+                sendLog('Starting bot...');
+                const startBot = exec(`cd ${repoPath} && npm start`);
+                startBot.stdout.on('data', data => sendLog(data));
+                startBot.stderr.on('data', data => sendLog(data));
             });
         }
-
-        res.send("✅ Repo cloned and running successfully!");
+        res.send('✅ Process started! Check console below.');
     } catch (err) {
         console.error(err);
-        res.send("❌ Error cloning repo.");
+        sendLog('❌ Error during clone/install/run.');
+        res.send('❌ Error starting process.');
     }
 });
 
-app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
+// Setup server + socket.io
+const server = require('http').createServer(app);
+const io = require('socket.io')(server);
+app.set('io', io);
+
+server.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
